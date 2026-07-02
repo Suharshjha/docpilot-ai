@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.docpilot.backend.RAGIntegrationTests
--------------------------------------------------------------------------------
-Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.111 s -- in com.docpilot.backend.RAGIntegrationTests
