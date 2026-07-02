@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: docpilot-db
+    environment:
+      MYSQL_DATABASE: docpilot_db
+      MYSQL_ROOT_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:-1712}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - docpilot-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${SPRING_DATASOURCE_PASSWORD:-1712}"]
+      timeout: 5s
+      retries: 10
+      interval: 5s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docpilot-backend
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/docpilot_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:-1712}
+      APP_OCR_MOCK: ${APP_OCR_MOCK:-false}
+      APP_OCR_TESSDATA_PATH: /usr/share/tesseract-ocr/5/tessdata
+      APP_STORAGE_UPLOAD_DIR: /app/storage/documents
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      PINECONE_API_KEY: ${PINECONE_API_KEY}
+      PINECONE_INDEX_URL: ${PINECONE_INDEX_URL}
+      APP_PINECONE_MOCK: ${APP_PINECONE_MOCK:-true}
+    volumes:
+      - doc-storage:/app/storage/documents
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - docpilot-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: docpilot-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - docpilot-network
+
+volumes:
+  mysql-data:
+  doc-storage:
+
+networks:
+  docpilot-network:
+    driver: bridge
