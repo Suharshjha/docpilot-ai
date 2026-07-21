@@ -96,6 +96,19 @@
             <artifactId>pdfbox</artifactId>
             <version>3.0.2</version>
         </dependency>
+
+        <!-- LangChain4j core -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j</artifactId>
+            <version>0.35.0</version>
+        </dependency>
+        <!-- LangChain4j Google Gemini integration -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-google-ai-gemini</artifactId>
+            <version>0.35.0</version>
+        </dependency>
         
         <!-- Testing -->
         <dependency>

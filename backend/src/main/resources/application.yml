@@ -27,10 +27,10 @@ app:
     # Token expiration time: 24 hours in milliseconds
     expiration-ms: 86400000
   ocr:
-    mock: ${APP_OCR_MOCK:false}
+    mock: ${APP_OCR_MOCK:true}
     tessdata-path: ${APP_OCR_TESSDATA_PATH:C:/Program Files/Tesseract-OCR/tessdata}
   storage:
-    upload-dir: ${APP_STORAGE_UPLOAD_DIR:C:/Users/suhar/.gemini/antigravity/scratch/docpilot-ai/storage/documents}
+    upload-dir: ${APP_STORAGE_UPLOAD_DIR:./storage/documents}
   gemini:
     api-key: ${GEMINI_API_KEY:}
     model: gemini-1.5-flash

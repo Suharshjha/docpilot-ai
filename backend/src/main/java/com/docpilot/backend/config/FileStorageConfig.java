@@ -11,7 +11,7 @@ import java.nio.file.Paths;
 @Configuration
 public class FileStorageConfig {
 
-    @Value("${app.storage.upload-dir:C:/Users/suhar/.gemini/antigravity/scratch/docpilot-ai/storage/documents}")
+    @Value("${app.storage.upload-dir:./storage/documents}")
     private String uploadDir;
 
     public Path getUploadPath() {

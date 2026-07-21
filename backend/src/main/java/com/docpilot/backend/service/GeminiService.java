@@ -8,6 +8,12 @@ import com.docpilot.backend.entity.DocumentData;
 import com.docpilot.backend.entity.DocumentStatus;
 import com.docpilot.backend.repository.DocumentRepository;
 import com.docpilot.backend.repository.DocumentDataRepository;
+import com.docpilot.backend.service.agent.ExtractionAgent;
+import com.docpilot.backend.service.agent.ValidationAgent;
+import com.docpilot.backend.service.agent.ExtractedMetadata;
+import com.docpilot.backend.service.agent.ValidationDecision;
+import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
+import dev.langchain4j.service.AiServices;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -17,6 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.*;
@@ -59,14 +66,70 @@ public class GeminiService {
 
         try {
             GeminiExtractionResponse responseDto;
+            String validationReasoning = "Confidence evaluated via standard threshold rule.";
+            boolean needsReview = false;
             
             // Check if API key is missing
             if (apiKey == null || apiKey.isEmpty() || apiKey.equalsIgnoreCase("your-gemini-api-key")) {
                 // Execute Mock extraction
                 responseDto = extractMock(document);
+                needsReview = responseDto.getVendorConfidence() < 0.8 
+                        || responseDto.getInvoiceNumberConfidence() < 0.8
+                        || responseDto.getAmountConfidence() < 0.8
+                        || responseDto.getDueDateConfidence() < 0.8
+                        || responseDto.getCategoryConfidence() < 0.8;
             } else {
-                // Execute real Gemini API call
-                responseDto = extractReal(document);
+                // Execute Real Multi-Agent LangChain pipeline
+                
+                // Initialize model
+                GoogleAiGeminiChatModel model = GoogleAiGeminiChatModel.builder()
+                        .apiKey(apiKey)
+                        .modelName(modelName)
+                        .build();
+
+                // ----------------------------------------------------
+                // AGENT 1: Extraction & Classification Agent
+                // ----------------------------------------------------
+                auditService.log("AGENT_1_START", "System", "Agent 1 Input: Extracting text from document: " + document.getOriginalFilename());
+                
+                ExtractionAgent extractionAgent = AiServices.builder(ExtractionAgent.class)
+                        .chatLanguageModel(model)
+                        .build();
+
+                ExtractedMetadata extractedMetadata = extractionAgent.extract(document.getRawText());
+                String agent1OutputJson = objectMapper.writeValueAsString(extractedMetadata);
+                auditService.log("AGENT_1_END", "System", "Agent 1 Output: Extracted metadata: " + agent1OutputJson);
+
+                // ----------------------------------------------------
+                // AGENT 2: Validation & Routing Agent (Handoff A1 -> A2)
+                // ----------------------------------------------------
+                auditService.log("AGENT_2_START", "System", "Agent 2 Input: Handing off extracted metadata JSON to Validation Agent.");
+                
+                ValidationAgent validationAgent = AiServices.builder(ValidationAgent.class)
+                        .chatLanguageModel(model)
+                        .build();
+
+                ValidationDecision validationDecision = validationAgent.validate(agent1OutputJson);
+                auditService.log("AGENT_2_END", "System", "Agent 2 Output: Routing Decision: " + validationDecision.getDecision() + ". Reasoning: " + validationDecision.getReasoning());
+
+                // Convert to responseDto for database mapping
+                responseDto = new GeminiExtractionResponse();
+                responseDto.setVendor(extractedMetadata.getVendor());
+                responseDto.setInvoiceNumber(extractedMetadata.getInvoiceNumber());
+                responseDto.setGst(extractedMetadata.getGst());
+                responseDto.setAmount(extractedMetadata.getAmount());
+                responseDto.setDueDate(extractedMetadata.getDueDate());
+                responseDto.setCurrency(extractedMetadata.getCurrency());
+                responseDto.setCategory(extractedMetadata.getCategory());
+                responseDto.setSummary(extractedMetadata.getSummary());
+                responseDto.setVendorConfidence(extractedMetadata.getVendorConfidence());
+                responseDto.setInvoiceNumberConfidence(extractedMetadata.getInvoiceNumberConfidence());
+                responseDto.setAmountConfidence(extractedMetadata.getAmountConfidence());
+                responseDto.setDueDateConfidence(extractedMetadata.getDueDateConfidence());
+                responseDto.setCategoryConfidence(extractedMetadata.getCategoryConfidence());
+
+                needsReview = validationDecision.getDecision().equalsIgnoreCase("NEEDS_REVIEW");
+                validationReasoning = validationDecision.getReasoning();
             }
 
             // Convert and save structured metadata
@@ -101,13 +164,6 @@ public class GeminiService {
             String confJson = objectMapper.writeValueAsString(confMap);
             data.setConfidenceScore(confJson);
 
-            // Determine check status (Human audit rules)
-            boolean needsReview = responseDto.getVendorConfidence() < 0.8 
-                    || responseDto.getInvoiceNumberConfidence() < 0.8
-                    || responseDto.getAmountConfidence() < 0.8
-                    || responseDto.getDueDateConfidence() < 0.8
-                    || responseDto.getCategoryConfidence() < 0.8;
-
             data.setStatus(needsReview ? "NEEDS_REVIEW" : "EXTRACTED");
             documentDataRepository.save(data);
 
@@ -119,10 +175,10 @@ public class GeminiService {
             // If high confidence across all parameters, auto-approve document!
             if (!needsReview) {
                 document.setStatus(DocumentStatus.APPROVED);
-                auditService.log("LLM_AUTO_APPROVE", "System", "High confidence metadata auto-approved: " + document.getOriginalFilename());
+                auditService.log("LLM_AUTO_APPROVE", "System", "Metadata auto-approved by Validation Agent. Reasoning: " + validationReasoning);
                 vectorService.indexDocumentAsync(document.getId());
             } else {
-                auditService.log("LLM_REVIEW_REQUIRED", "System", "Metadata confidence below threshold, review required: " + document.getOriginalFilename());
+                auditService.log("LLM_REVIEW_REQUIRED", "System", "Metadata review flagged by Validation Agent. Reasoning: " + validationReasoning);
             }
             
             documentRepository.save(document);
@@ -133,63 +189,6 @@ public class GeminiService {
             auditService.log("LLM_FAILURE", "System", "LLM metadata extraction failed: " + e.getMessage());
             System.err.println(">>> Gemini Service error: " + e.getMessage());
         }
-    }
-
-    private GeminiExtractionResponse extractReal(Document document) throws Exception {
-        String url = String.format("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", modelName, apiKey);
-
-        String prompt = String.format(
-            "Extract structured metadata from the following OCR text. Return ONLY a valid JSON object matching the following schema. " +
-            "Do NOT wrap the JSON in Markdown code blocks (e.g. do NOT use ```json). Return raw JSON text only.\n" +
-            "{\n" +
-            "  \"vendor\": \"String (name of vendor or candidate or buyer, default null)\",\n" +
-            "  \"invoiceNumber\": \"String (invoice/PO/document ID number, default null)\",\n" +
-            "  \"gst\": \"String (GST/tax identifier if present, default null)\",\n" +
-            "  \"amount\": Number (total numeric value or amount, default null),\n" +
-            "  \"dueDate\": \"String (ISO date YYYY-MM-DD format, default null)\",\n" +
-            "  \"currency\": \"String (3-letter currency code like USD/INR, default 'USD')\",\n" +
-            "  \"category\": \"String (must be one of: INVOICE, RESUME, PURCHASE_ORDER, CONTRACT, OTHER)\",\n" +
-            "  \"summary\": \"String (2-3 sentence brief summary profile)\",\n" +
-            "  \"vendorConfidence\": Number (confidence score 0.0 to 1.0),\n" +
-            "  \"invoiceNumberConfidence\": Number (confidence score 0.0 to 1.0),\n" +
-            "  \"amountConfidence\": Number (confidence score 0.0 to 1.0),\n" +
-            "  \"dueDateConfidence\": Number (confidence score 0.0 to 1.0),\n" +
-            "  \"categoryConfidence\": Number (confidence score 0.0 to 1.0)\n" +
-            "}\n\n" +
-            "OCR Text:\n%s", document.getRawText()
-        );
-
-        // Build request payload
-        Map<String, Object> textPart = new HashMap<>();
-        textPart.put("text", prompt);
-
-        Map<String, Object> partContainer = new HashMap<>();
-        partContainer.put("parts", Collections.singletonList(textPart));
-
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("contents", Collections.singletonList(partContainer));
-
-        Map<String, Object> genConfig = new HashMap<>();
-        genConfig.put("responseMimeType", "application/json");
-        payload.put("generationConfig", genConfig);
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-
-        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
-        String responseStr = restTemplate.postForObject(url, entity, String.class);
-
-        // Parse response
-        JsonNode root = objectMapper.readTree(responseStr);
-        String rawJson = root.path("candidates")
-                .path(0)
-                .path("content")
-                .path("parts")
-                .path(0)
-                .path("text")
-                .asText();
-
-        return objectMapper.readValue(rawJson.trim(), GeminiExtractionResponse.class);
     }
 
     private GeminiExtractionResponse extractMock(Document document) {
